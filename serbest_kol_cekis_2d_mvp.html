@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Serbest Kol Çekiş (Kuru Alan) - 2D MVP</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:#0b1220;color:#e8eefc}
+    header{padding:14px 16px;border-bottom:1px solid rgba(255,255,255,.08);display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+    header h1{font-size:16px;margin:0;font-weight:650}
+    .btn{background:#2b6cff;border:none;color:white;padding:10px 12px;border-radius:10px;font-weight:650}
+    .btn.secondary{background:rgba(255,255,255,.08)}
+    .btn:disabled{opacity:.5}
+    main{display:grid;grid-template-columns:1.2fr .8fr;gap:12px;padding:12px}
+    @media (max-width: 900px){ main{grid-template-columns:1fr;}}
+    .card{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.09);border-radius:14px;overflow:hidden}
+    .card h2{font-size:14px;margin:0;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.08)}
+    .card .content{padding:12px}
+    #wrap{position:relative;width:100%;aspect-ratio: 4 / 3;background:black}
+    video,canvas{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover}
+    .metric{display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px dashed rgba(255,255,255,.12)}
+    .metric:last-child{border-bottom:none}
+    .k{opacity:.8}
+    .v{font-weight:750}
+    .note{font-size:12px;opacity:.85;line-height:1.35}
+    .pill{display:inline-block;padding:4px 8px;border-radius:999px;background:rgba(255,255,255,.10);font-size:12px;margin-right:6px}
+    .warn{color:#ffd28a}
+    .ok{color:#a7ffb0}
+  </style>
+</head>
+<body>
+<header>
+  <h1>Serbest Kol Çekiş (Kuru Alan) – Kamera Üstü 2D Puanlama (MVP)</h1>
+  <button id="btnStart" class="btn">Başlat</button>
+  <button id="btnStop" class="btn secondary" disabled>Durdur</button>
+  <span class="pill" id="status">Hazır</span>
+  <span class="pill" id="sidePill">Kol: Sağ (varsayılan)</span>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Kamera</h2>
+    <div class="content">
+      <div id="wrap">
+        <video id="video" playsinline></video>
+        <canvas id="canvas"></canvas>
+      </div>
+      <p class="note">
+        Önerilen çekim: Telefon göğüs hizası, sporcu kadrajda tam gövde, <b>yandan</b> (sağ tarafı kameraya dönük), 2–3 metre mesafe.
+        Işık iyi olsun. Kamera sabit.
+      </p>
+      <p class="note warn">
+        Not: Kamera erişimi çoğu telefonda yalnızca <b>HTTPS</b> sayfalarda çalışır. Bu dosyayı bir siteye (GitHub Pages/Netlify) koyup açman en kolay yöntemdir.
+      </p>
+    </div>
+  </section>
+
+  <aside class="card">
+    <h2>Skor & Geri Bildirim</h2>
+    <div class="content">
+      <div class="metric"><span class="k">Teknik Skoru</span><span class="v" id="techScore">–</span></div>
+      <div class="metric"><span class="k">Tempo Skoru</span><span class="v" id="tempoScore">–</span></div>
+      <div class="metric"><span class="k">Genel Skor</span><span class="v" id="overallScore">–</span></div>
+      <div class="metric"><span class="k">Tekrar (Rep)</span><span class="v" id="repCount">0</span></div>
+      <div class="metric"><span class="k">Dirsek Açısı (°)</span><span class="v" id="elbowAngle">–</span></div>
+      <div class="metric"><span class="k">Bu Rep Min Dirsek (°)</span><span class="v" id="repMinElbow">–</span></div>
+      <div class="metric"><span class="k">Ortalama Rep Süresi (sn)</span><span class="v" id="avgRep">–</span></div>
+      <div class="metric"><span class="k">Tutarlılık (std, sn)</span><span class="v" id="stdRep">–</span></div>
+      <div class="metric"><span class="k">Geri Bildirim</span><span class="v" id="feedback">–</span></div>
+
+      <p class="note">
+        Bu MVP şu iki şeye bakar: (1) Rep sırasında dirseğin <b>en düşük açı</b> değeri (hedef ~90°),
+        (2) Rep sürelerinin <b>tutarlılığı</b>.
+      </p>
+      <p class="note">
+        Sonraki sürümde: bilek yörüngesi, omuz stabilitesi, gövde rotasyonu proxy’leri, sol/sağ simetri eklenir.
+      </p>
+    </div>
+  </aside>
+</main>
+
+<!-- TensorFlow.js + Pose Detection (MoveNet) -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js"></script>
+
+<script>
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+
+  const btnStart = document.getElementById('btnStart');
+  const btnStop = document.getElementById('btnStop');
+  const statusEl = document.getElementById('status');
+
+  const techScoreEl = document.getElementById('techScore');
+  const tempoScoreEl = document.getElementById('tempoScore');
+  const overallScoreEl = document.getElementById('overallScore');
+  const repCountEl = document.getElementById('repCount');
+  const elbowAngleEl = document.getElementById('elbowAngle');
+  const repMinElbowEl = document.getElementById('repMinElbow');
+  const avgRepEl = document.getElementById('avgRep');
+  const stdRepEl = document.getElementById('stdRep');
+  const feedbackEl = document.getElementById('feedback');
+
+  let detector = null;
+  let rafId = null;
+  let running = false;
+
+  // Rep state
+  let repCount = 0;
+  let lastRepTime = null;
+  let repDurations = [];      // seconds
+  let inPull = false;         // phase flag
+  let repMinElbow = 999;      // min elbow angle for current rep
+  let lastAngle = null;
+
+  // Choose RIGHT arm for MVP (side-on)
+  const KP = {
+    rShoulder: 'right_shoulder',
+    rElbow: 'right_elbow',
+    rWrist: 'right_wrist',
+    lShoulder: 'left_shoulder',
+    lElbow: 'left_elbow',
+    lWrist: 'left_wrist'
+  };
+
+  function setStatus(text, cls=null){
+    statusEl.textContent = text;
+    statusEl.className = 'pill' + (cls ? (' ' + cls) : '');
+  }
+
+  function resizeCanvas(){
+    const rect = video.getBoundingClientRect();
+    canvas.width = Math.round(rect.width * devicePixelRatio);
+    canvas.height = Math.round(rect.height * devicePixelRatio);
+  }
+
+  function angleDeg(a, b, c){
+    // angle at point b for points a-b-c
+    const abx = a.x - b.x, aby = a.y - b.y;
+    const cbx = c.x - b.x, cby = c.y - b.y;
+    const dot = abx*cbx + aby*cby;
+    const ab = Math.hypot(abx, aby);
+    const cb = Math.hypot(cbx, cby);
+    const cos = dot / (ab*cb + 1e-6);
+    const clamped = Math.max(-1, Math.min(1, cos));
+    return Math.acos(clamped) * (180/Math.PI);
+  }
+
+  function getKP(pose, name){
+    // MoveNet in pose-detection returns keypoints with names
+    const kp = pose.keypoints.find(k => k.name === name);
+    return kp ? kp : null;
+  }
+
+  function drawKeypoints(pose){
+    const kps = pose.keypoints;
+    ctx.lineWidth = 3 * devicePixelRatio;
+    // points
+    for(const k of kps){
+      if((k.score ?? 0) < 0.35) continue;
+      ctx.beginPath();
+      ctx.arc(k.x*devicePixelRatio, k.y*devicePixelRatio, 4*devicePixelRatio, 0, Math.PI*2);
+      ctx.fillStyle = 'rgba(0,255,180,0.9)';
+      ctx.fill();
+    }
+    // simple right arm lines
+    const s = getKP(pose, KP.rShoulder), e = getKP(pose, KP.rElbow), w = getKP(pose, KP.rWrist);
+    if(s && e && w && s.score>0.35 && e.score>0.35 && w.score>0.35){
+      ctx.strokeStyle = 'rgba(255,220,120,0.95)';
+      ctx.beginPath();
+      ctx.moveTo(s.x*devicePixelRatio, s.y*devicePixelRatio);
+      ctx.lineTo(e.x*devicePixelRatio, e.y*devicePixelRatio);
+      ctx.lineTo(w.x*devicePixelRatio, w.y*devicePixelRatio);
+      ctx.stroke();
+    }
+  }
+
+  function mean(arr){
+    return arr.reduce((a,b)=>a+b,0) / (arr.length || 1);
+  }
+  function std(arr){
+    const m = mean(arr);
+    const v = mean(arr.map(x => (x-m)*(x-m)));
+    return Math.sqrt(v);
+  }
+
+  function clamp(x, lo, hi){ return Math.max(lo, Math.min(hi, x)); }
+
+  function scoreFromMinElbow(minElbow){
+    // ideal ~90°. tolerance +-25°.
+    const err = Math.abs(minElbow - 90);
+    // linear falloff: 0 err -> 100, 25 err -> ~62.5, 45 err -> ~32.5
+    return clamp(100 - err*1.5, 0, 100);
+  }
+
+  function scoreTempo(repDurations){
+    // want consistent tempo; penalize high std relative to mean
+    if(repDurations.length < 3) return null;
+    const m = mean(repDurations);
+    const s = std(repDurations);
+    const ratio = s / (m + 1e-6);
+    // ratio 0.05 -> ~90+, 0.15 -> ~60, 0.25 -> ~30
+    return clamp(100 - ratio*300, 0, 100);
+  }
+
+  function feedback(minElbow, tempoScore){
+    let msgs = [];
+    if(minElbow === null) return "Kamera/iskelet güveni düşük. Işık/mesafe düzelt.";
+    if(minElbow > 115) msgs.push("Dirsek çok düz: çekişte dirsek daha bükülsün (hedef ~90°).");
+    if(minElbow < 65) msgs.push("Aşırı büküm: dirsek fazla kapanıyor (65–110° aralığına dön).");
+    if(tempoScore !== null){
+      if(tempoScore < 55) msgs.push("Tempo dalgalı: tekrar sürelerini daha eşit tut.");
+      else if(tempoScore > 85) msgs.push("Tempo tutarlı.");
+    }
+    if(msgs.length === 0) msgs.push("Devam. Kadraj ve yan açı iyi görünüyor.");
+    return msgs.join(" ");
+  }
+
+  function updateUI(currentAngle, currentMin){
+    elbowAngleEl.textContent = currentAngle ? currentAngle.toFixed(0) : "–";
+    repMinElbowEl.textContent = (currentMin && currentMin<999) ? currentMin.toFixed(0) : "–";
+    repCountEl.textContent = String(repCount);
+
+    let tech = null;
+    if(repDurations.length > 0){
+      // technique based on last completed rep's min elbow
+      const lastMin = window.lastCompletedMinElbow ?? null;
+      if(lastMin !== null) tech = scoreFromMinElbow(lastMin);
+    }
+    const tempo = scoreTempo(repDurations);
+
+    if(repDurations.length >= 1){
+      avgRepEl.textContent = mean(repDurations).toFixed(2);
+      stdRepEl.textContent = (repDurations.length >= 3) ? std(repDurations).toFixed(2) : "–";
+    } else {
+      avgRepEl.textContent = "–";
+      stdRepEl.textContent = "–";
+    }
+
+    if(tech === null) techScoreEl.textContent = "–";
+    else techScoreEl.textContent = tech.toFixed(0);
+
+    if(tempo === null) tempoScoreEl.textContent = "–";
+    else tempoScoreEl.textContent = tempo.toFixed(0);
+
+    let overall = null;
+    if(tech !== null && tempo !== null) overall = 0.6*tech + 0.4*tempo;
+    else if(tech !== null) overall = tech;
+
+    overallScoreEl.textContent = overall === null ? "–" : overall.toFixed(0);
+
+    const lastMin = window.lastCompletedMinElbow ?? null;
+    feedbackEl.textContent = feedback(lastMin, tempo);
+  }
+
+  function phaseAndRepLogic(elbowAngle){
+    // Simple phase detection based on angle thresholds.
+    // Start pull when angle drops below 130; end rep when it rises above 155 after a pull.
+    const now = performance.now();
+
+    repMinElbow = Math.min(repMinElbow, elbowAngle);
+
+    if(!inPull && elbowAngle < 130){
+      inPull = true;
+    }
+    if(inPull && elbowAngle > 155){
+      // rep complete
+      inPull = false;
+      repCount += 1;
+
+      const t = now/1000;
+      if(lastRepTime !== null){
+        const dur = t - lastRepTime;
+        // keep reasonable durations only
+        if(dur > 0.3 && dur < 5.0) repDurations.push(dur);
+        if(repDurations.length > 20) repDurations.shift();
+      }
+      lastRepTime = t;
+
+      // store last completed min elbow for scoring
+      window.lastCompletedMinElbow = repMinElbow;
+      repMinElbow = 999;
+    }
+  }
+
+  async function initDetector(){
+    await tf.setBackend('webgl').catch(()=>{});
+    await tf.ready();
+
+    const model = poseDetection.SupportedModels.MoveNet;
+    detector = await poseDetection.createDetector(model, {
+      modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
+      enableSmoothing: true
+    });
+  }
+
+  async function startCamera(){
+    const constraints = {
+      audio: false,
+      video: {
+        facingMode: "user", // front camera (mirror-like)
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      }
+    };
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    video.srcObject = stream;
+    await video.play();
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
+  }
+
+  function stopCamera(){
+    const stream = video.srcObject;
+    if(stream){
+      stream.getTracks().forEach(t => t.stop());
+    }
+    video.srcObject = null;
+  }
+
+  async function loop(){
+    if(!running) return;
+
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    // draw video frame to canvas (mirrored)
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if(vw && vh){
+      // scale to canvas
+      const cw = canvas.width, ch = canvas.height;
+      // cover transform
+      const s = Math.max(cw/vw, ch/vh);
+      const dw = vw*s, dh = vh*s;
+      const dx = (cw - dw)/2, dy = (ch - dh)/2;
+
+      // mirror
+      ctx.save();
+      ctx.translate(cw, 0);
+      ctx.scale(-1, 1);
+      ctx.drawImage(video, -dx - dw, dy, dw, dh);
+      ctx.restore();
+
+      const poses = await detector.estimatePoses(video, {flipHorizontal: true});
+      if(poses && poses[0]){
+        const pose = poses[0];
+        // Extract right arm KPs
+        const s = getKP(pose, KP.rShoulder);
+        const e = getKP(pose, KP.rElbow);
+        const w = getKP(pose, KP.rWrist);
+
+        drawKeypoints(pose);
+
+        let angle = null;
+        if(s && e && w && s.score>0.35 && e.score>0.35 && w.score>0.35){
+          angle = angleDeg(s, e, w);
+          phaseAndRepLogic(angle);
+          setStatus("Takip ediliyor", "ok");
+        } else {
+          setStatus("İskelet düşük güven – kadraj/ışık", "warn");
+        }
+
+        updateUI(angle, repMinElbow);
+      } else {
+        setStatus("Kişi bulunamadı", "warn");
+      }
+    }
+
+    rafId = requestAnimationFrame(loop);
+  }
+
+  function resetSession(){
+    repCount = 0;
+    lastRepTime = null;
+    repDurations = [];
+    inPull = false;
+    repMinElbow = 999;
+    window.lastCompletedMinElbow = null;
+    updateUI(null, null);
+  }
+
+  btnStart.addEventListener('click', async () => {
+    try{
+      btnStart.disabled = true;
+      setStatus("Model yükleniyor…");
+      if(!detector) await initDetector();
+
+      setStatus("Kamera açılıyor…");
+      await startCamera();
+
+      resetSession();
+      running = true;
+      btnStop.disabled = false;
+      setStatus("Başladı", "ok");
+      loop();
+    } catch(err){
+      console.error(err);
+      setStatus("Hata: Kamera/izin/HTTPS kontrol et", "warn");
+      btnStart.disabled = false;
+    }
+  });
+
+  btnStop.addEventListener('click', () => {
+    running = false;
+    if(rafId) cancelAnimationFrame(rafId);
+    stopCamera();
+    btnStop.disabled = true;
+    btnStart.disabled = false;
+    setStatus("Durduruldu");
+  });
+</script>
+</body>
+</html>
